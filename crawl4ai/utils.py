@@ -49,6 +49,9 @@ from urllib.parse import (
     parse_qsl, urlencode, quote, unquote
 )
 import inspect
+from copy import deepcopy
+from collections.abc import Mapping
+from datetime import datetime, timezone
 
 
 # Monkey patch to fix wildcard handling in urllib.robotparser.
@@ -58,6 +61,51 @@ import inspect
 # rule to the lowest priority and breaks Allow: overrides -- so only patch the
 # older implementation, which has no wildcard support at all.
 import sys
+
+
+def attach_extraction_provenance(
+    records: Any,
+    source_url: Optional[str],
+    extracted_at: Optional[datetime | str] = None,
+) -> Any:
+    """Return extraction records annotated with normalized provenance.
+
+    The input is copied before it is traversed, so neither the top-level
+    records nor nested dictionaries are modified. Every mapping in a
+    structured record receives ``source_url`` and an ISO-8601 ``extracted_at``
+    value; lists and tuples are traversed while preserving their container
+    type. A missing or blank URL is represented as ``None``.
+
+    This small downstream-fork contribution is attributed to Troy Bacon.
+    """
+    normalized_source_url = (
+        normalize_url(source_url.strip(), source_url.strip())
+        if source_url and source_url.strip()
+        else None
+    )
+    if extracted_at is None:
+        timestamp = datetime.now(timezone.utc).isoformat()
+    elif isinstance(extracted_at, datetime):
+        timestamp_value = extracted_at if extracted_at.tzinfo else extracted_at.replace(tzinfo=timezone.utc)
+        timestamp = timestamp_value.isoformat()
+    else:
+        timestamp = datetime.fromisoformat(
+            extracted_at.replace("Z", "+00:00")
+        ).isoformat()
+
+    def annotate(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            copied = {key: annotate(item) for key, item in value.items()}
+            copied["source_url"] = normalized_source_url
+            copied["extracted_at"] = timestamp
+            return copied
+        if isinstance(value, list):
+            return [annotate(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(annotate(item) for item in value)
+        return deepcopy(value)
+
+    return annotate(records)
 
 if sys.version_info < (3, 14):
     from urllib.robotparser import RuleLine
